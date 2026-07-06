@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>西側単車線のみ 十字路交差点シミュレーション</title>
+  <style>
+    body {
+      margin: 0;
+      background: #ffffff;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #111827;
+      text-align: center;
+    }
+    header {
+      padding: 14px 18px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #ffffff;
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    p { margin: 0; color: #4b5563; font-size: 13px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 330px;
+      gap: 14px;
+      padding: 14px;
+      align-items: start;
+    }
+    canvas {
+      background: #ffffff;
+      border: 2px solid #111827;
+      box-shadow: 0 2px 10px rgba(0,0,0,.12);
+      max-width: 100%;
+    }
+    aside {
+      text-align: left;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    fieldset {
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      margin: 0 0 10px;
+      padding: 10px;
+      background: #ffffff;
+    }
+    legend { font-weight: 700; font-size: 13px; padding: 0 6px; }
+    label {
+      display: grid;
+      grid-template-columns: 1fr 80px;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      margin: 8px 0;
+    }
+    input, button { width: 100%; box-sizing: border-box; }
+    button {
+      padding: 7px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #ffffff;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px dashed #dddddd;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+    .note { font-size: 11px; line-height: 1.55; color: #4b5563; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>西側単車線のみ 十字路交差点シミュレーション</h1>
+</header>
+
+<div class="layout">
+  <main>
+    <canvas id="cv" width="900" height="600"></canvas>
+  </main>
+
+  <aside>
+    <fieldset>
+      <legend>操作</legend>
+      <div class="row">
+        <button id="pauseBtn">一時停止</button>
+        <button id="resetBtn">リセット</button>
+      </div>
+      <label>速度倍率 <input id="speed" type="range" min="0.5" max="5" step="0.5" value="1.5"></label>
+      <div class="row">
+        <button onclick="manualSignal=null">自動</button>
+        <button onclick="manualSignal='green'">青</button>
+      </div>
+      <div class="row">
+        <button onclick="manualSignal='yellow'">黄</button>
+        <button onclick="manualSignal='red'">赤</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>交通条件</legend>
+      <label>流入量 台/時 <input id="flow" type="range" min="100" max="1800" step="50" value="850"></label><span id="flowV"></span>
+      <label>右折率 % <input id="rightRate" type="range" min="0" max="60" step="1" value="25"></label><span id="rightRateV"></span>
+      <label>左折率 % <input id="leftRate" type="range" min="0" max="50" step="1" value="15"></label><span id="leftRateV"></span>
+      <label>大型車率 % <input id="truckRate" type="range" min="0" max="50" step="1" value="10"></label><span id="truckRateV"></span>
+      <label>対向流入量 台/時 <input id="oppFlow" type="range" min="0" max="1800" step="50" value="700"></label><span id="oppFlowV"></span>
+    </fieldset>
+
+    <fieldset>
+      <legend>集計</legend>
+      <div id="stats"></div>
+    </fieldset>
+
+    <p class="note">
+      背景は白、道路のみグレー。車は西側から東向きに1車線で発生します。<br>
+      <b style="color:#2563eb">青</b>=直進 &nbsp;
+      <b style="color:#16a34a">緑</b>=左折 &nbsp;
+      <b style="color:#f97316">橙</b>=右折 &nbsp;
+      <b style="color:#8b5cf6">紫</b>=大型車<br>
+      <b style="color:#ca8a04">黄</b>=停止コミット中（制動中） &nbsp;
+      <b style="color:#dc2626">赤</b>=通過コミット（止まれず通過中）<br>
+      対向車線（東→西、直進のみ・グレー）も追加。信号は西側と同期します。<br>
+      右折車は対向車の速度に応じた安全ギャップ距離未満なら待機します。
+    </p>
+  </aside>
+</div>
+
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W = cv.width;
+const H = cv.height;
+const FPS = 60;
+const DT = 1 / FPS;
+
+// -----------------------------
+// 座標設定
+// -----------------------------
+const X_STOP = 370;       // 西側から来る車の停止線
+const X_CENTER = 450;     // 交差点中心
+const MAIN_Y = 285;       // 西→東の単車線 y座標
+
+// ── 対向車線（東→西、直進のみ）──
+const OPP_Y = 305;             // 対向車線 y座標（西行き車線）
+const OPP_X_STOP = 490;        // 対向車の停止線（交差点東側）
+const OPP_SPAWN_X = W + 70;    // 対向車スポーン位置（画面右外）
+
+// ── 右折弧（西→南）: 東向き→南向きへ滑らかに接続 ──
+//   開始点で東向き、終端で南向きになるよう、円弧中心を開始点の真下に置く。
+const R_RIGHT   = 60;
+const X_RIGHT_START = 410;                 // 弧の進入 x（東進車線上・交差点西端）
+const CX_RIGHT  = X_RIGHT_START;           // 円弧中心 x：開始点と同じ
+const CY_RIGHT  = MAIN_Y + R_RIGHT;        // 円弧中心 y：開始点の真下
+const ARC_RIGHT = R_RIGHT * Math.PI / 2;   // 弧の全長
+const X_RIGHT_EXIT = CX_RIGHT + R_RIGHT;   // 南行き車線中心 x（弧の出口）
+
+// ── 左折弧（西→北）: 東向き→北向きへ滑らかに接続 ──
+//   左折後は縦道路の左側車線へ入るよう、弧の出口を x=430 に揃える。
+const R_LEFT    = 50;
+const X_LEFT_EXIT = 430;                   // 北向き左側車線の中心 x
+const X_LEFT_START = X_LEFT_EXIT - R_LEFT; // 弧の進入 x（東進車線上）
+const CX_LEFT   = X_LEFT_START;            // 円弧中心 x：開始点と同じ
+const CY_LEFT   = MAIN_Y - R_LEFT;         // 円弧中心 y：開始点の真上
+const ARC_LEFT  = R_LEFT * Math.PI / 2;    // 弧の全長
+
+let t = 0;
+let cars = [];
+let nextSpawn = 0;
+let nextOppSpawn = 0;
+let idSeq = 1;
+let paused = false;
+let manualSignal = null;
+
+let stats = makeStats();
+
+const $ = id => document.getElementById(id);
+const val = id => +$(id).value;
+
+function makeStats() {
+  return {
+    generated: 0,
+    passed: 0,
+    passedS: 0,
+    passedL: 0,
+    passedR: 0,
+    maxQueue: 0,
+    travelTimes: [],
+    stopCounts: []
+  };
+}
+
+function kmh(v) {
+  // 描画用に速度を小さくするため、m/s相当をさらに4で割る
+  return (v / 3.6) / 4;
+}
+
+function randExp(ratePerHour) {
+  const lambda = ratePerHour / 3600;
+  return -Math.log(1 - Math.random()) / Math.max(lambda, 1e-6);
+}
+
+function avg(arr) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function turnEndX(car) {
+  if (car.dir === 'left') return X_LEFT_START + ARC_LEFT;
+  if (car.dir === 'right') return X_RIGHT_START + ARC_RIGHT;
+  return Infinity;
+}
+function isAfterTurn(car) {
+  return !car.isOncoming &&
+    ((car.dir === 'left'  && car.x > X_LEFT_START  + ARC_LEFT) ||
+     (car.dir === 'right' && car.x > X_RIGHT_START + ARC_RIGHT));
+}
+function isInTurnPrepOrArc(car) {
+  return !car.isOncoming &&
+    ((car.dir === 'left'  && car.x > X_LEFT_START  - 50 && car.x <= X_LEFT_START  + ARC_LEFT) ||
+     (car.dir === 'right' && car.x > X_RIGHT_START - 40 && car.x <= X_RIGHT_START + ARC_RIGHT));
+}
+function isSameRouteLeader(car, other) {
+  if (other.id === car.id) return false;
+  if (other.isOncoming !== car.isOncoming) return false;
+  if (car.isOncoming) return true;
+
+  // 交差点手前の西側単車線では全車が同じ列として並ぶ。
+  const carBeforeIntersection = !car.signalCleared && car.x < X_STOP;
+  const otherBeforeIntersection = !other.signalCleared && other.x < X_STOP;
+  if (carBeforeIntersection && otherBeforeIntersection) return true;
+
+  // 信号通過後/右左折後は進路別に分離する。
+  // これにより、曲がった後の車が直進車や別方向の右左折車を先行車と誤認して停止するのを防ぐ。
+  if (car.dir !== other.dir) return false;
+
+  // 右左折後は、同じ曲がり方向で、同じく曲がった後の車だけを追従対象にする。
+  if (isAfterTurn(car)) return isAfterTurn(other);
+
+  return true;
+}
+
+function decideTurn() {
+  const left = val('leftRate') / 100;
+  const right = val('rightRate') / 100;
+  const r = Math.random();
+  if (r < left) return 'left';
+  if (r < left + right) return 'right';
+  return 'straight';
+}
+
+function vehicleParam(isTruck) {
+  if (isTruck) {
+    return { len: 44, width: 20, vMax: kmh(38), acc: 0.010, dec: 0.018 };
+  }
+  return { len: 30, width: 18, vMax: kmh(50), acc: 0.018, dec: 0.026 };
+}
+
+class Car {
+  constructor(opts = {}) {
+    this.id = idSeq++;
+    this.isOncoming = !!opts.isOncoming;
+
+    if (this.isOncoming) {
+      // 対向車: 東側スポーン → 西へ進む。x は「スポーン地点からの走行距離」として
+      // 東進車と同じ意味で扱う（画面座標へは OPP_SPAWN_X - x で変換）。
+      this.x = -70;
+      this.dir = 'straight'; // 対向車は直進のみ
+    } else {
+      this.x = -70;
+      this.dir = decideTurn();
+    }
+
+    this.isTruck = Math.random() < val('truckRate') / 100;
+    this.p = vehicleParam(this.isTruck);
+    this.v = this.p.vMax * 0.75;
+    this.state = 'approach';
+    this.spawnTime = t;
+    this.stopCount = 0;
+    this.wasStopped = false;
+    // --- 信号通過制御フラグ ---
+    // ignoreSignal : 止まれないと判断し停止線を無視して通過中
+    // committed    : 停止 or 通過の判定を一度確定したら再評価しない（バグ②③対策）
+    this.ignoreSignal = false;
+    this.committed    = false;
+    // 停止線を十分に越えた車は、以後の信号判定から除外する。
+    // 右左折後に赤・黄信号の停止処理が残って車が止まる問題を防ぐ。
+    this.signalCleared = false;
+  }
+}
+
+function reset() {
+  t = 0;
+  cars = [];
+  nextSpawn = randExp(val('flow'));
+  nextOppSpawn = randExp(val('oppFlow'));
+  idSeq = 1;
+  stats = makeStats();
+}
+
+function signalState() {
+  if (manualSignal) return manualSignal;
+  const cycle = t % 90;
+  if (cycle < 55) return 'green';
+  if (cycle < 60) return 'yellow';
+  return 'red';
+}
+
+function queueLength() {
+  return cars.filter(c => !c.isOncoming && c.x < X_STOP && c.v < 0.05).length;
+}
+
+function spawnCar() {
+  if (t >= nextSpawn) {
+    const hasNearSpawn = cars.some(c => !c.isOncoming && c.x < 45);
+    if (!hasNearSpawn) {
+      cars.push(new Car());
+      stats.generated++;
+    }
+    nextSpawn = t + randExp(val('flow'));
+  }
+
+  // 対向車（東→西、直進のみ）
+  if (t >= nextOppSpawn) {
+    const hasNearOppSpawn = cars.some(c => c.isOncoming && c.x < 45);
+    if (!hasNearOppSpawn) {
+      cars.push(new Car({ isOncoming: true }));
+    }
+    nextOppSpawn = t + randExp(val('oppFlow'));
+  }
+}
+
+// ── 右折車が対向車を見て曲がれるか判定 ──────────────────────────
+// 対向車の「速度」と「交差点（弧進入点）までの距離」の両方を見て、
+// 安全に右折できるかを判定する。
+//   1) 速度帯ごとに必要な最小ギャップ距離(px)を決める
+//      → 速い対向車ほど大きな距離的余裕が必要
+//   2) 対向車の実際の距離がその最小ギャップ未満なら「待つ」
+// 戻り値: 待つべき場合は targetV の上限(ほぼ0)、待たなくてよい場合は null
+function checkOncomingGap(car) {
+  // 信号が青でなければ対向車線も止まっている可能性が高いが、
+  // 黄/赤からの通過コミット車（ignoreSignal）もいるため常に検査する。
+  let nearestOpp = null;
+  let nearestDist = Infinity;
+
+  for (const other of cars) {
+    if (!other.isOncoming) continue;
+    // 対向車の画面x座標（西へ進むほど小さくなる）
+    const oppScreenX = OPP_SPAWN_X - other.x;
+    // 弧進入点（交差点入口、対向車から見て手前側）までの距離
+    const dist = oppScreenX - X_RIGHT_START;
+    if (dist > -20 && dist < nearestDist) { // 既に通過した車(dist<-20)は無視
+      nearestDist = dist;
+      nearestOpp = other;
+    }
+  }
+
+  if (!nearestOpp) return null; // 対向車がいない → 自由に右折可
+
+  const v = nearestOpp.v; // px/tick
+
+  // ① 対向車の速度を3段階に分岐し、それぞれ必要な最小ギャップ距離を決定
+  //    速度域は vMax(乗用車)=kmh(50)を基準に概ね 等分。
+  const V_FAST = kmh(50) * 0.66;  // 高速域のしきい値
+  const V_MID  = kmh(50) * 0.30;  // 中速域のしきい値
+
+  let requiredGap;
+  if (v >= V_FAST) {
+    requiredGap = 230;   // 速い対向車 → 大きな余裕が必要
+  } else if (v >= V_MID) {
+    requiredGap = 140;   // 中速の対向車 → 中程度の余裕
+  } else {
+    requiredGap = 70;    // 遅い/停止寸前の対向車 → 小さな余裕でも可
+  }
+
+  // ② 対向車と信号（交差点進入点）からの距離を、速度ごとのしきい値と比較
+  if (nearestDist < requiredGap) {
+    // 距離不足 → 待つ（弧進入手前でほぼ停止）
+    return 0;
+  }
+  return null; // 十分な距離 → 曲がってよい
+}
+
+function findTarget(car, sig) {
+  let targetX = Infinity;
+  let targetV = car.p.vMax;
+  let targetLen = 0;
+
+  // 先行車を探す。
+  // 交差点手前は西側単車線として全車を追従対象にし、
+  // 信号通過後・右左折後は進路別に分離する。
+  for (const other of cars) {
+    if (!isSameRouteLeader(car, other)) continue;
+    if (other.x > car.x && other.x < targetX) {
+      targetX = other.x;
+      targetV = other.v;
+      targetLen = other.p.len;
+    }
+  }
+
+  // ── 信号停止判定 ──────────────────────────────────────────
+  // 対向車線も同じ信号タイミングで停止線(OPP_X_STOP)に従う
+  const stopLineX = car.isOncoming ? OPP_X_STOP : X_STOP;
+
+  // 停止線を超えて交差点内へ入った車は、以後の信号判定を終了する。
+  if (!car.signalCleared && !car.isOncoming) {
+    const turnArcStarted =
+      (car.dir === 'left'  && car.x >= X_LEFT_START) ||
+      (car.dir === 'right' && car.x >= X_RIGHT_START);
+    if (car.x > stopLineX + 12 || turnArcStarted) {
+      car.signalCleared = true;
+      car.committed = false;
+      car.ignoreSignal = false;
+    }
+  }
+
+  // 青信号でのリセットは、信号未通過の車だけに適用する。
+  if (!car.signalCleared && sig === 'green') {
+    car.committed    = false;
+    car.ignoreSignal = false;
+  }
+
+  const mustStop = !car.signalCleared && (sig === 'red' || sig === 'yellow');
+  if (mustStop) {
+    if (car.committed) {
+      // バグ②③対策: 一度「停止する」と決めた車は停止線を越えても判定を維持
+      if (!car.ignoreSignal) {
+        // 停止コミット済み → 停止線を目標に設定し続ける
+        const stopTarget = stopLineX - 8;
+        if (stopTarget < targetX) {
+          targetX  = stopTarget;
+          targetV  = 0;
+          targetLen = 0;
+        }
+      }
+      // ignoreSignal=true の車は committed でも targetX は変えない（通過させる）
+    } else if (car.x + car.p.len <= stopLineX) {
+      // まだ未判定 → 今から制動できるか評価する
+      const stopTarget  = stopLineX - 8;
+      const distToStop  = stopTarget - car.x;
+
+      // バグ①対策: acc ベースで制動距離を計算（IDM が実際に出せる減速力に合わせる）
+      // IDM の最大減速 ≈ acc なので v²/(2×acc) が実際の停止距離
+      const d_brake = (car.v * car.v) / (2 * car.p.acc);
+
+      if (distToStop > 0 && stopTarget < targetX) {
+        if (distToStop >= d_brake * 1.1 || car.v < 0.01) {
+          // 十分な余裕あり → 停止コミット
+          car.ignoreSignal = false;
+          car.committed    = true;
+          targetX  = stopTarget;
+          targetV  = 0;
+          targetLen = 0;
+        } else {
+          // 余裕なし → 通過コミット（以降 committed=true で再評価しない）
+          car.ignoreSignal = true;
+          car.committed    = true;
+        }
+      }
+    }
+    // 停止線通過済み・未committed の車は何もしない
+  }
+
+  // 左折・右折時は弧の手前〜弧の中だけ低速化する。
+  // 曲がった後は低速制限を解除し、現在速度を維持しながら退出方向へ直進する。
+  if (car.dir === 'left' && car.x > X_LEFT_START - 50 && car.x <= X_LEFT_START + ARC_LEFT) {
+    targetV = Math.min(targetV, kmh(16));
+  }
+  if (car.dir === 'right' && car.x > X_RIGHT_START - 40 && car.x <= X_RIGHT_START + ARC_RIGHT) {
+    targetV = Math.min(targetV, kmh(12));
+  }
+  if (isAfterTurn(car)) {
+    targetV = Math.max(targetV, car.v, kmh(car.dir === 'left' ? 18 : 16));
+  }
+
+  // ── 右折車 vs 対向車のギャップ判定 ──────────────────────────
+  // 西側からの右折車は、対向車線（東→西）の直進車と交差するため、
+  // 安全に曲がれるギャップが無ければ弧の進入手前で待つ。
+  if (car.dir === 'right' && !car.isOncoming && car.x < X_RIGHT_START) {
+    const oncomingBlockV = checkOncomingGap(car);
+    if (oncomingBlockV !== null) {
+      targetV = Math.min(targetV, oncomingBlockV);
+      // 対向車待ちのため、弧の進入点を一時的な「壁」として使う
+      if (X_RIGHT_START < targetX) {
+        targetX = X_RIGHT_START;
+        targetLen = 0;
+      }
+    }
+  }
+
+  return { targetX, targetV, targetLen };
+}
+
+function moveCar(car, sig) {
+  const { targetX, targetV, targetLen } = findTarget(car, sig);
+  const gap = Math.max(2, targetX - car.x - targetLen - 8);
+
+  // 簡易IDM風の加減速
+  const desiredGap = 10 + car.v * 65 + Math.max(0, car.v - targetV) * 75;
+  let a = car.p.acc * (1 - Math.pow(car.v / car.p.vMax, 4) - Math.pow(desiredGap / gap, 2));
+
+  car.v = Math.max(0, Math.min(car.p.vMax, car.v + a));
+  if (car.v < 0.004) car.v = 0;
+
+  if (car.v < 0.05 && !car.wasStopped) {
+    car.stopCount++;
+    car.wasStopped = true;
+  }
+  if (car.v >= 0.08) {
+    car.wasStopped = false;
+  }
+
+  car.x += car.v;
+}
+
+function removeExitedCars() {
+  cars = cars.filter(car => {
+    let out = false;
+
+    if (car.isOncoming) {
+      // 対向車: 画面座標 = OPP_SPAWN_X - car.x。西側の画面外で退場。
+      out = (OPP_SPAWN_X - car.x) < -80;
+    } else if (car.dir === 'straight') {
+      out = car.x > W + 80;
+    } else if (car.dir === 'left') {
+      // 弧進入点 + 弧長 + 北上直線分
+      out = car.x > X_LEFT_START + ARC_LEFT + 200;
+    } else if (car.dir === 'right') {
+      // 弧進入点 + 弧長 + 南下直線分
+      out = car.x > X_RIGHT_START + ARC_RIGHT + 200;
+    }
+
+    if (out) {
+      if (!car.isOncoming) {
+        stats.passed++;
+        stats.travelTimes.push(t - car.spawnTime);
+        stats.stopCounts.push(car.stopCount);
+        if (car.dir === 'straight') stats.passedS++;
+        if (car.dir === 'left') stats.passedL++;
+        if (car.dir === 'right') stats.passedR++;
+      }
+      return false;
+    }
+    return true;
+  });
+}
+
+function recordMetrics() {
+  stats.maxQueue = Math.max(stats.maxQueue, queueLength());
+}
+
+function step() {
+  const repeat = Math.max(1, Math.round(val('speed')));
+  for (let i = 0; i < repeat; i++) {
+    const sig = signalState();
+    spawnCar();
+    for (const car of cars) moveCar(car, sig);
+    removeExitedCars();
+    recordMetrics();
+    t += DT;
+  }
+}
+
+function drawRoad() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+
+  // 十字路。道路はグレー、背景は白。
+  ctx.fillStyle = '#d8d8d8';
+  ctx.fillRect(0, 255, W, 80);
+  ctx.fillRect(410, 0, 80, H);
+
+  // 車線中央線。単車線流入なので西側の車線だけを使う。
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([16, 14]);
+  ctx.beginPath();
+  ctx.moveTo(0, 295);
+  ctx.lineTo(410, 295);
+  ctx.moveTo(490, 295);
+  ctx.lineTo(W, 295);
+  ctx.moveTo(450, 0);
+  ctx.lineTo(450, 255);
+  ctx.moveTo(450, 335);
+  ctx.lineTo(450, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 道路外枠
+  ctx.strokeStyle = '#111827';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(0, 255, W, 80);
+  ctx.strokeRect(410, 0, 80, H);
+
+  // 停止線（西側）
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(X_STOP, 255, 5, 40);
+
+  // 停止線（対向車線・東側）
+  ctx.fillRect(OPP_X_STOP - 5, 255, 5, 40);
+
+  // ラベル
+  ctx.fillStyle = '#111827';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('西側から流入（東行き）', 70, 270);
+  ctx.fillText('対向車線（西行き・直進のみ）', 600, 320);
+}
+
+function drawSignal(sig) {
+  const color = sig === 'green' ? '#22c55e' : sig === 'yellow' ? '#eab308' : '#ef4444';
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(340, 205, 26, 62);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(353, 236, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#111827';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('信号: ' + (sig === 'green' ? '青' : sig === 'yellow' ? '黄' : '赤'), 20, 28);
+}
+
+// ── 車の画面座標・向きを返す ──────────────────────────────────
+// car.x は「スポーン原点からの走行距離 s」
+// 直進: s がそのまま画面 x に対応
+// 右折: s >= X_RIGHT_START で弧に入り、弧後は南下直進
+// 左折: s >= X_LEFT_START  で弧に入り、弧後は北上直進
+function getCarPose(car) {
+  const s = car.x;  // 走行距離
+
+  if (car.isOncoming) {
+    // 対向車: 東スポーン地点から西へ直進のみ。画面x = OPP_SPAWN_X - s
+    return { x: OPP_SPAWN_X - s, y: OPP_Y, angle: Math.PI };
+  }
+
+  if (car.dir === 'right') {
+    if (s < X_RIGHT_START) {
+      // 弧の手前: 東進直線
+      return { x: s, y: MAIN_Y, angle: 0 };
+    }
+    const ds = s - X_RIGHT_START;         // 弧内進行量
+    if (ds <= ARC_RIGHT) {
+      // θ: -π/2 → 0、接線角: θ + π/2 = 0 → π/2
+      const theta = -Math.PI / 2 + ds / R_RIGHT;
+      const px    = CX_RIGHT + R_RIGHT * Math.cos(theta);
+      const py    = CY_RIGHT + R_RIGHT * Math.sin(theta);
+      const angle = theta + Math.PI / 2;
+      return { x: px, y: py, angle };
+    }
+    // 弧を抜けた後: 南下直線
+    const beyond = ds - ARC_RIGHT;
+    return { x: X_RIGHT_EXIT, y: CY_RIGHT + beyond, angle: Math.PI / 2 };
+  }
+  if (car.dir === 'left') {
+    if (s < X_LEFT_START) {
+      // 弧の手前: 東進直線
+      return { x: s, y: MAIN_Y, angle: 0 };
+    }
+    const ds = s - X_LEFT_START;
+    if (ds <= ARC_LEFT) {
+      // θ: π/2 → 0、接線角: θ - π/2 = 0 → -π/2
+      const theta = Math.PI / 2 - ds / R_LEFT;
+      const px    = CX_LEFT + R_LEFT * Math.cos(theta);
+      const py    = CY_LEFT + R_LEFT * Math.sin(theta);
+      const angle = theta - Math.PI / 2;
+      return { x: px, y: py, angle };
+    }
+    // 弧後: 北上直線。右側車線ではなく左側車線を走る。
+    const beyond = ds - ARC_LEFT;
+    return { x: X_LEFT_EXIT, y: CY_LEFT - beyond, angle: -Math.PI / 2 };
+  }
+  // 直進
+  return { x: s, y: MAIN_Y, angle: 0 };
+}
+
+function drawCar(car) {
+  const pose = getCarPose(car);
+  ctx.save();
+  ctx.translate(pose.x, pose.y);
+  ctx.rotate(pose.angle);
+
+  // 色分け:
+  //   グレー = 対向車（東→西、直進のみ）
+  //   赤    = 通過コミット（ignoreSignal=true）
+  //   黄緑  = 停止コミット中（committed=true, ignoreSignal=false）
+  //   通常色 = 未コミット（青=直進, 緑=左折, 橙=右折, 紫=大型車）
+  if (car.isOncoming) {
+    ctx.fillStyle = car.ignoreSignal ? '#dc2626' : (car.committed ? '#9ca3af' : '#6b7280'); // グレー系
+  } else if (car.ignoreSignal) {
+    ctx.fillStyle = '#dc2626';           // 赤：通過コミット
+  } else if (car.committed) {
+    ctx.fillStyle = '#ca8a04';           // 黄：停止コミット中
+  } else if (car.isTruck) {
+    ctx.fillStyle = '#8b5cf6';           // 紫：大型車
+  } else if (car.dir === 'straight') {
+    ctx.fillStyle = '#2563eb';           // 青：直進
+  } else if (car.dir === 'left') {
+    ctx.fillStyle = '#16a34a';           // 緑：左折
+  } else {
+    ctx.fillStyle = '#f97316';           // 橙：右折
+  }
+
+  ctx.fillRect(-car.p.len / 2, -car.p.width / 2, car.p.len, car.p.width);
+
+  // 前方を示す黒い帯
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(car.p.len / 2 - 5, -car.p.width / 2, 4, car.p.width);
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(255,255,255,.92)';
+  ctx.fillRect(12, 38, 250, 70);
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.strokeRect(12, 38, 250, 70);
+
+  ctx.fillStyle = '#111827';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(`時刻 ${t.toFixed(1)} 秒`, 24, 60);
+  ctx.fillText(`停止キュー ${queueLength()} 台`, 24, 82);
+}
+
+function draw() {
+  const sig = signalState();
+  drawRoad();
+  drawSignal(sig);
+  for (const car of cars) drawCar(car);
+  drawHUD();
+}
+
+function updateStats() {
+  $('flowV').textContent = val('flow') + ' 台/時';
+  $('rightRateV').textContent = val('rightRate') + ' %';
+  $('leftRateV').textContent = val('leftRate') + ' %';
+  $('truckRateV').textContent = val('truckRate') + ' %';
+  $('oppFlowV').textContent = val('oppFlow') + ' 台/時';
+
+  const waitingRight = cars.filter(c => !c.isOncoming && c.dir === 'right' && c.v < 0.05 && c.x > X_STOP).length;
+
+  $('stats').innerHTML = `
+    <div class="stat"><span>発生台数</span><b>${stats.generated}</b></div>
+    <div class="stat"><span>通過台数</span><b>${stats.passed}</b></div>
+    <div class="stat"><span>直進/左折/右折</span><b>${stats.passedS}/${stats.passedL}/${stats.passedR}</b></div>
+    <div class="stat"><span>最大停止キュー</span><b>${stats.maxQueue}</b></div>
+    <div class="stat"><span>対向車待ち右折車</span><b>${waitingRight}</b></div>
+    <div class="stat"><span>平均通過時間</span><b>${avg(stats.travelTimes).toFixed(1)} 秒</b></div>
+    <div class="stat"><span>平均停止回数</span><b>${avg(stats.stopCounts).toFixed(2)}</b></div>
+  `;
+}
+
+function loop() {
+  if (!paused) step();
+  draw();
+  updateStats();
+  requestAnimationFrame(loop);
+}
+
+$('pauseBtn').onclick = () => {
+  paused = !paused;
+  $('pauseBtn').textContent = paused ? '再開' : '一時停止';
+};
+$('resetBtn').onclick = reset;
+
+reset();
+loop();
+</script>
+</body>
+</html>
